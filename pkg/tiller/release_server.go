@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -621,6 +622,29 @@ func (s *ReleaseServer) InstallRelease(c ctx.Context, req *services.InstallRelea
 	return res, err
 }
 
+// retrieves a value from another release in the form of:
+// tiller://<release>/<valuename>
+func (s *ReleaseServer) getReleaseValue(urlInput string) (interface{}, error) {
+	valueUrl, err := url.Parse(urlInput)
+	if err != nil {
+		return nil, err
+	}
+	if valueUrl.Scheme != "tiller" {
+		return nil, fmt.Errorf("usupported scheme for value lookup: %s, only 'tiller://' is supported", valueUrl.Scheme)
+	}
+	rel := valueUrl.Host
+	name := valueUrl.Path
+	deployedRelease, err := s.env.Releases.Deployed(rel)
+	if err != nil {
+		return nil, err
+	}
+	v, ok := deployedRelease.Config.Values[name]
+	if !ok {
+		return nil, fmt.Errorf("%s value not found in %s", name, rel)
+	}
+	return v.Value, nil
+}
+
 // prepareRelease builds a release for an install operation.
 func (s *ReleaseServer) prepareRelease(req *services.InstallReleaseRequest) (*release.Release, error) {
 	if req.Chart == nil {
@@ -637,6 +661,20 @@ func (s *ReleaseServer) prepareRelease(req *services.InstallReleaseRequest) (*re
 	valuesToRender, err := chartutil.ToRenderValues(req.Chart, req.Values, options)
 	if err != nil {
 		return nil, err
+	}
+
+	// check values for special tiller lookup urls
+	for k, v := range valuesToRender {
+		if strings.Contains(v.(string), "tiller://") {
+			// value is a tiller lookup
+			releaseValue, err := s.getReleaseValue(v.(string))
+			if err != nil {
+				// TODO should this just warn and leave the URL value?
+				return nil, err
+			}
+			// update the Config to use the looked up value
+			valuesToRender[k] = releaseValue
+		}
 	}
 
 	hooks, manifestDoc, notesTxt, err := s.renderResources(req.Chart, valuesToRender)
